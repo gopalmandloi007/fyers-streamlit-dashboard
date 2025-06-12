@@ -1,48 +1,26 @@
 import streamlit as st
 import pandas as pd
+from integrate import ConnectToIntegrate, IntegrateOrders
 import requests
 from datetime import datetime, timedelta
 
-# ---- Helper API classes ----
-class ConnectToIntegrate:
-    BASE_URL = "https://integrate.definedgesecurities.com/dart/v1"
-    def __init__(self):
-        self.api_token = None
-        self.api_secret = None
-    def login(self, api_token, api_secret):
-        self.api_token = api_token
-        self.api_secret = api_secret
-    @property
-    def headers(self):
-        return {"x-api-key": self.api_token, "x-api-secret": self.api_secret}
+# --- Load secrets
+api_token = st.secrets["integrate_api_token"]
+api_secret = st.secrets["integrate_api_secret"]
+uid = st.secrets["integrate_uid"]
+actid = st.secrets["integrate_actid"]
+api_session_key = st.secrets["integrate_api_session_key"]
+ws_session_key = st.secrets["integrate_ws_session_key"]
 
-class IntegrateOrders:
-    def __init__(self, conn):
-        self.conn = conn
-    def holdings(self):
-        url = f"{self.conn.BASE_URL}/holdings"
-        resp = requests.get(url, headers=self.conn.headers)
-        st.write("HOLDINGS API CALL DEBUG:")
-        st.write("URL:", url)
-        st.write("HEADERS:", self.conn.headers)
-        st.write("STATUS:", resp.status_code)
-        st.write("RESPONSE:", resp.text)
-        resp.raise_for_status()
-        return resp.json()
-    def positions(self):
-        url = f"{self.conn.BASE_URL}/positions"
-        resp = requests.get(url, headers=self.conn.headers)
-        st.write("POSITIONS API CALL DEBUG:")
-        st.write("URL:", url)
-        st.write("HEADERS:", self.conn.headers)
-        st.write("STATUS:", resp.status_code)
-        st.write("RESPONSE:", resp.text)
-        resp.raise_for_status()
-        return resp.json()
+# --- API setup
+conn = ConnectToIntegrate()
+conn.login(api_token, api_secret)
+conn.set_session_keys(uid, actid, api_session_key, ws_session_key)
+io = IntegrateOrders(conn)
 
 def get_definedge_ltp_and_yclose(segment, token, session_key, max_days_lookback=10):
     headers = {'Authorization': session_key}
-    ltp, yclose = None, None
+    ltp = None
     try:
         url = f"https://integrate.definedgesecurities.com/dart/v1/quotes/{segment}/{token}"
         response = requests.get(url, headers=headers, timeout=10)
@@ -52,6 +30,7 @@ def get_definedge_ltp_and_yclose(segment, token, session_key, max_days_lookback=
     except Exception:
         pass
 
+    yclose = None
     closes = []
     for offset in range(1, max_days_lookback+1):
         dt = datetime.now() - timedelta(days=offset-1)
@@ -167,19 +146,8 @@ def positions_tabular(positions_book):
         )
     return df
 
-# --------- STREAMLIT UI ---------
 st.set_page_config(page_title="Perfect Holdings / Positions (Live LTP & P&L)", layout="wide")
 st.title("Perfect Holdings / Positions (Live LTP & P&L)")
-
-# --- credentials from secrets.toml
-api_token = st.secrets["integrate_api_token"]
-api_secret = st.secrets["integrate_api_secret"]
-api_session_key = st.secrets.get("integrate_api_session_key", "")
-
-# connect
-conn = ConnectToIntegrate()
-conn.login(api_token, api_secret)
-io = IntegrateOrders(conn)
 
 # Holdings
 st.header("Holdings")
