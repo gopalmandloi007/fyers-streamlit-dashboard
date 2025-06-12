@@ -6,7 +6,6 @@ from integrate import ConnectToIntegrate, IntegrateOrders
 definedge_api_token = st.secrets["definedge_api_token"]
 definedge_api_secret = st.secrets["definedge_api_secret"]
 
-# --- Connect & Session Management ---
 @st.cache_resource
 def get_integrate_orders():
     conn = ConnectToIntegrate()
@@ -187,7 +186,9 @@ elif section == "🛒 Place Order":
 elif section == "🛠️ Modify/Cancel Order":
     st.header("Modify/Cancel Pending Orders")
     try:
-        order_book = io.orders().get("orders", [])
+        orders_response = io.orders()
+        st.write("Orders API Response:", orders_response)  # DEBUG
+        order_book = orders_response.get("orders", [])
         pending = [o for o in order_book if o.get("order_status") in ("NEW", "OPEN", "REPLACED") and int(float(o.get("pending_qty", 0))) > 0]
         if not pending:
             st.info("No pending orders.")
@@ -228,7 +229,9 @@ elif section == "🛠️ Modify/Cancel Order":
 elif section == "📒 Order & Trade Book":
     st.header("Order Book")
     try:
-        orders = io.orders().get("orders", [])
+        orders_response = io.orders()
+        st.write("Orders API Response:", orders_response)  # DEBUG
+        orders = orders_response.get("orders", [])
         if not orders:
             st.info("No order data.")
         else:
@@ -238,7 +241,9 @@ elif section == "📒 Order & Trade Book":
     st.header("Trade Book")
     try:
         try:
-            trades = io.tradebook().get("trades", [])
+            trades_response = io.tradebook()
+            st.write("Trade Book API Response:", trades_response)  # DEBUG
+            trades = trades_response.get("trades", [])
         except:
             trades = io.tradebook().get("data", [])
         if not trades:
