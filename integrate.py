@@ -8,13 +8,12 @@ class ConnectToIntegrate:
         self.api_secret = None
 
     def login(self, api_token, api_secret):
-        # Most APIs just require headers - adjust if your API is different!
+        # DO NOT make any HTTP request here!
         self.api_token = api_token
         self.api_secret = api_secret
 
     @property
     def headers(self):
-        # Adjust header field names if needed as per Definedge docs
         return {
             "Authorization": self.api_token,
             "x-api-secret": self.api_secret
