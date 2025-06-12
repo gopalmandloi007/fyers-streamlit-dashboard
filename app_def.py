@@ -22,19 +22,24 @@ class IntegrateOrders:
     def holdings(self):
         url = f"{self.conn.BASE_URL}/holdings"
         resp = requests.get(url, headers=self.conn.headers)
-        if resp.status_code != 200:
-            st.error(f"{resp.status_code} - {resp.text}")
+        st.write("HOLDINGS API CALL DEBUG:")
+        st.write("URL:", url)
+        st.write("HEADERS:", self.conn.headers)
+        st.write("STATUS:", resp.status_code)
+        st.write("RESPONSE:", resp.text)
         resp.raise_for_status()
         return resp.json()
     def positions(self):
         url = f"{self.conn.BASE_URL}/positions"
         resp = requests.get(url, headers=self.conn.headers)
-        if resp.status_code != 200:
-            st.error(f"{resp.status_code} - {resp.text}")
+        st.write("POSITIONS API CALL DEBUG:")
+        st.write("URL:", url)
+        st.write("HEADERS:", self.conn.headers)
+        st.write("STATUS:", resp.status_code)
+        st.write("RESPONSE:", resp.text)
         resp.raise_for_status()
         return resp.json()
 
-# ---- Helper functions ----
 def get_definedge_ltp_and_yclose(segment, token, session_key, max_days_lookback=10):
     headers = {'Authorization': session_key}
     ltp, yclose = None, None
