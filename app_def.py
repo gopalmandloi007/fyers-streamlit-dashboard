@@ -80,6 +80,12 @@ def holdings_tabular(holdings_book, master_mapping, session_key):
     total_overall_pnl = 0
     total_invested = 0
     total_current = 0
+
+    headers = [
+        "Symbol", "LTP", "Avg Buy", "Qty", "P.Close", "%Chg", "Today P&L", "Overall P&L",
+        "%Chg Avg", "Invested", "Current", "Exchange", "ISIN"
+    ]
+
     for h in raw:
         dp_qty = float(h.get("dp_qty", 0) or 0)
         avg_buy_price = float(h.get("avg_buy_price", 0) or 0)
@@ -111,39 +117,51 @@ def holdings_tabular(holdings_book, master_mapping, session_key):
                 total_invested += invested
                 total_current += current
 
-                table.append({
-                    "Symbol": tsym,
-                    "LTP": ltp,
-                    "Avg Buy": avg_buy_price,
-                    "Qty": holding_qty,
-                    "Prev Close": yest_close,
-                    "% Chg": pct_change,
-                    "Today P&L": today_pnl,
-                    "Overall P&L": overall_pnl,
-                    "% Chg Avg": pct_change_avg,
-                    "Invested": invested,
-                    "Current": current,
-                    "Exchange": exch,
-                    "ISIN": isin
-                })
-    df = pd.DataFrame(table)
+                table.append([
+                    tsym,
+                    f"{ltp:.2f}" if ltp is not None else "N/A",
+                    f"{avg_buy_price:.2f}",
+                    int(holding_qty),
+                    f"{yest_close:.2f}" if yest_close is not None else "N/A",
+                    f"{pct_change:.2f}" if pct_change is not None else "N/A",
+                    f"{today_pnl:.2f}" if today_pnl is not None else "N/A",
+                    f"{overall_pnl:.2f}" if overall_pnl is not None else "N/A",
+                    f"{pct_change_avg:.2f}" if pct_change_avg is not None else "N/A",
+                    f"{invested:.2f}",
+                    f"{current:.2f}",
+                    exch,
+                    isin
+                ])
+    df = pd.DataFrame(table, columns=headers)
     summary = {
-        "Today P&L": total_today_pnl,
-        "Overall P&L": total_overall_pnl,
-        "Total Invested": total_invested,
-        "Total Current": total_current
+        "Today P&L": round(total_today_pnl, 2),
+        "Overall P&L": round(total_overall_pnl, 2),
+        "Total Invested": round(total_invested, 2),
+        "Total Current": round(total_current, 2)
     }
     return df, summary
 
 def positions_tabular(positions_book):
     raw = positions_book.get('positions', [])
-    df = pd.DataFrame(raw)
-    if not df.empty:
-        df["% Change"] = df.apply(
-            lambda p: round((float(p.get("lastPrice", 0)) - float(p.get("net_averageprice", 0))) / float(p.get("net_averageprice", 1)) * 100, 2)
-            if float(p.get("net_averageprice", 0)) else None,
-            axis=1
-        )
+    table = []
+    headers = [
+        "Symbol", "Avg. Buy", "Qty", "Unrealised P&L", "Realized P&L", "% Change", "Product Type"
+    ]
+    for p in raw:
+        tsym = p.get("tradingsymbol", "")
+        avg_buy = p.get("net_averageprice", "")
+        qty = p.get("net_quantity", "")
+        unreal = p.get("unrealized_pnl", "")
+        realized = p.get("realized_pnl", "")
+        try:
+            last_price = float(p.get("lastPrice", 0))
+            avg_price = float(avg_buy if avg_buy not in ("", None) else 0)
+            pct_change = round((last_price - avg_price) / avg_price * 100, 2) if avg_price else "N/A"
+        except Exception:
+            pct_change = "N/A"
+        prod = p.get("product_type", "")
+        table.append([tsym, avg_buy, qty, unreal, realized, pct_change, prod])
+    df = pd.DataFrame(table, columns=headers)
     return df
 
 st.set_page_config(page_title="Perfect Holdings / Positions (Live LTP & P&L)", layout="wide")
@@ -158,12 +176,9 @@ try:
     else:
         master_mapping = build_master_mapping_from_holdings(holdings_book)
         df_hold, summary = holdings_tabular(holdings_book, master_mapping, api_session_key)
-        if not df_hold.empty:
-            st.dataframe(df_hold)
-            st.write("**Summary**")
-            st.write(summary)
-        else:
-            st.info("No NSE holdings found.")
+        st.write("**Summary**")
+        st.write(summary)
+        st.dataframe(df_hold)
 except Exception as e:
     st.error(f"Failed to get holdings: {e}")
 
@@ -175,9 +190,6 @@ try:
         st.info("No positions found or API returned: " + str(positions_book))
     else:
         df_pos = positions_tabular(positions_book)
-        if not df_pos.empty:
-            st.dataframe(df_pos)
-        else:
-            st.info("No positions data in API result.")
+        st.dataframe(df_pos)
 except Exception as e:
     st.error(f"Failed to get positions: {e}")
