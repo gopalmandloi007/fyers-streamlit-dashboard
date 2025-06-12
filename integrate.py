@@ -6,17 +6,32 @@ class ConnectToIntegrate:
     def __init__(self):
         self.api_token = None
         self.api_secret = None
+        self.uid = None
+        self.actid = None
+        self.api_session_key = None
+        self.ws_session_key = None
 
     def login(self, api_token, api_secret):
         self.api_token = api_token
         self.api_secret = api_secret
 
+    def set_session_keys(self, uid, actid, api_session_key, ws_session_key):
+        self.uid = uid
+        self.actid = actid
+        self.api_session_key = api_session_key
+        self.ws_session_key = ws_session_key
+
     @property
     def headers(self):
-        return {
+        # For holdings/positions, the session key is also required in Authorization header (per your Colab logic)
+        base = {
             "x-api-key": self.api_token,
-            "x-api-secret": self.api_secret
+            "x-api-secret": self.api_secret,
         }
+        # Attach session key if available
+        if self.api_session_key:
+            base["Authorization"] = self.api_session_key
+        return base
 
 class IntegrateOrders:
     def __init__(self, conn):
@@ -31,47 +46,5 @@ class IntegrateOrders:
     def positions(self):
         url = f"{self.conn.BASE_URL}/positions"
         resp = requests.get(url, headers=self.conn.headers)
-        resp.raise_for_status()
-        return resp.json()
-
-    def orders(self):
-        url = f"{self.conn.BASE_URL}/orders"
-        resp = requests.get(url, headers=self.conn.headers)
-        resp.raise_for_status()
-        return resp.json()
-
-    def tradebook(self):
-        url = f"{self.conn.BASE_URL}/tradebook"
-        resp = requests.get(url, headers=self.conn.headers)
-        resp.raise_for_status()
-        return resp.json()
-
-    def place_order(self, **kwargs):
-        url = f"{self.conn.BASE_URL}/placeorder"
-        resp = requests.post(url, headers={**self.conn.headers, "Content-Type": "application/json"}, json=kwargs)
-        resp.raise_for_status()
-        return resp.json()
-
-    def modify_order(self, **kwargs):
-        url = f"{self.conn.BASE_URL}/modify"
-        resp = requests.post(url, headers={**self.conn.headers, "Content-Type": "application/json"}, json=kwargs)
-        resp.raise_for_status()
-        return resp.json()
-
-    def cancel_order(self, order_id):
-        url = f"{self.conn.BASE_URL}/cancel/{order_id}"
-        resp = requests.get(url, headers=self.conn.headers)
-        resp.raise_for_status()
-        return resp.json()
-
-    def place_gtt_order(self, **kwargs):
-        url = f"{self.conn.BASE_URL}/gtt"
-        resp = requests.post(url, headers={**self.conn.headers, "Content-Type": "application/json"}, json=kwargs)
-        resp.raise_for_status()
-        return resp.json()
-
-    def place_oco_order(self, **kwargs):
-        url = f"{self.conn.BASE_URL}/oco"
-        resp = requests.post(url, headers={**self.conn.headers, "Content-Type": "application/json"}, json=kwargs)
         resp.raise_for_status()
         return resp.json()
