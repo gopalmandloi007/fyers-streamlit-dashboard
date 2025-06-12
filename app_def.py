@@ -1,9 +1,8 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime
 from integrate import ConnectToIntegrate, IntegrateOrders
 
-# --- Definedge Credentials from Streamlit secrets ---
+# --- Credentials from Streamlit secrets ---
 definedge_api_token = st.secrets["definedge_api_token"]
 definedge_api_secret = st.secrets["definedge_api_secret"]
 
@@ -17,7 +16,6 @@ def get_integrate_orders():
 
 io = get_integrate_orders()
 
-# --- Sidebar Navigation ---
 st.sidebar.title("Definedge Dashboard")
 section = st.sidebar.radio(
     "Go to", [
@@ -35,8 +33,9 @@ section = st.sidebar.radio(
 if section == "📊 Holdings (Live LTP & P&L)":
     st.header("📊 Holdings (Live LTP & P&L)")
     try:
-        holdings_raw = io.holdings()
-        data = holdings_raw.get("data", [])
+        holdings_response = io.holdings()
+        st.write("Holdings API Response:", holdings_response)  # DEBUG
+        data = holdings_response.get("data", [])
         rows = []
         for h in data:
             ts_list = h.get("tradingsymbol", [])
@@ -49,11 +48,12 @@ if section == "📊 Holdings (Live LTP & P&L)":
                     avg = float(h.get("avg_buy_price", 0) or 0)
                     ltp = None
                     try:
-                        ltp_resp = io.conn.BASE_URL + f"/quotes/NSE/{token}"
                         import requests
-                        resp = requests.get(ltp_resp, headers=io.conn.headers)
+                        ltp_url = io.conn.BASE_URL + f"/quotes/NSE/{token}"
+                        resp = requests.get(ltp_url, headers=io.conn.headers)
                         ltp = float(resp.json().get("ltp", 0))
-                    except: ltp = 0
+                    except Exception:
+                        ltp = 0
                     invest = avg * qty
                     pnl = (ltp - avg) * qty if ltp and avg else 0
                     rows.append({
@@ -66,7 +66,10 @@ if section == "📊 Holdings (Live LTP & P&L)":
                         "P&L": pnl,
                         "P&L %": round((pnl / invest) * 100, 2) if invest else 0
                     })
-        st.dataframe(pd.DataFrame(rows))
+        if rows:
+            st.dataframe(pd.DataFrame(rows))
+        else:
+            st.info("No holdings found.")
     except Exception as e:
         st.error(f"Failed to fetch holdings: {e}")
 
@@ -74,7 +77,9 @@ if section == "📊 Holdings (Live LTP & P&L)":
 elif section == "📈 Exit Holdings/Positions":
     st.header("Exit Holdings/Positions")
     try:
-        holdings = io.holdings().get("data", [])
+        holdings_response = io.holdings()
+        st.write("Holdings API Response:", holdings_response)  # DEBUG
+        holdings = holdings_response.get("data", [])
         st.subheader("Holdings")
         hflat = []
         for h in holdings:
@@ -92,7 +97,6 @@ elif section == "📈 Exit Holdings/Positions":
             if st.button("Exit Selected Holdings at MARKET"):
                 for h in hflat:
                     if h["symbol"] in selected and float(h["qty"]) > 0:
-                        # Place sell order (simplified: CNC MARKET)
                         try:
                             resp = io.place_order(
                                 tradingsymbol=h["symbol"],
@@ -111,8 +115,11 @@ elif section == "📈 Exit Holdings/Positions":
                             st.error(f"Order failed: {e}")
         else:
             st.info("No holdings found.")
+
         st.subheader("Positions")
-        pos = io.positions().get("positions", [])
+        positions_response = io.positions()
+        st.write("Positions API Response:", positions_response)  # DEBUG
+        pos = positions_response.get("positions", [])
         pflat = []
         for p in pos:
             pflat.append({
@@ -297,6 +304,7 @@ elif section == "🔔 GTT/OCO Modify/Cancel":
         import requests
         url = io.conn.BASE_URL + "/gttorders"
         resp = requests.get(url, headers=io.conn.headers)
+        st.write("Raw GTT Orders API Response:", resp.json())  # DEBUG
         orders = resp.json().get("pendingGTTOrderBook", []) or resp.json().get("gtt_orders", []) or resp.json().get("data", [])
         if not orders:
             st.info("No GTT/OCO orders found.")
@@ -308,7 +316,6 @@ elif section == "🔔 GTT/OCO Modify/Cancel":
             selected = df.iloc[idx-1]
             alert_id = selected.get("alert_id", selected.get("gtt_id", selected.get("id", "")))
             if action == "Cancel" and st.button("Cancel GTT/OCO Order"):
-                # Try both GTT and OCO cancel endpoints
                 try:
                     url = io.conn.BASE_URL + f"/gttcancel/{alert_id}"
                     resp = requests.get(url, headers=io.conn.headers)
@@ -322,7 +329,6 @@ elif section == "🔔 GTT/OCO Modify/Cancel":
                         st.error(f"Cancel failed: {e}\n{e2}")
             if action == "Modify":
                 if "stoploss_price" in selected or "target_price" in selected:
-                    # OCO modify
                     new_target = st.text_input("New Target Price", value=str(selected.get("target_price", "")))
                     new_stop = st.text_input("New Stoploss Price", value=str(selected.get("stoploss_price", "")))
                     new_target_qty = st.text_input("New Target Qty", value=str(selected.get("target_quantity", "")))
@@ -346,7 +352,6 @@ elif section == "🔔 GTT/OCO Modify/Cancel":
                         except Exception as e:
                             st.error(f"OCO modify failed: {e}")
                 else:
-                    # Single GTT modify
                     new_trigger = st.text_input("New Trigger Price", value=str(selected.get("trigger_price", "")))
                     new_price = st.text_input("New Order Price", value=str(selected.get("price", "")))
                     new_qty = st.text_input("New Qty", value=str(selected.get("quantity", "")))
