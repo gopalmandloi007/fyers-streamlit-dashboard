@@ -1,228 +1,179 @@
 import streamlit as st
 import pandas as pd
+import requests
+from datetime import datetime, timedelta
+
 from integrate import ConnectToIntegrate, IntegrateOrders
 
-# Read secrets (TOML) from .streamlit/secrets.toml
+st.set_page_config(page_title="Definedge Holdings & Positions", layout="wide")
+
+# --- Helper Functions ---
+def get_definedge_ltp_and_yclose(segment, token, session_key, max_days_lookback=10):
+    headers = {'Authorization': session_key}
+    ltp = None
+    try:
+        url = f"https://integrate.definedgesecurities.com/dart/v1/quotes/{segment}/{token}"
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            ltp = float(data.get('ltp')) if data.get('ltp') not in (None, "null", "") else None
+    except Exception:
+        pass
+
+    yclose = None
+    closes = []
+    for offset in range(1, max_days_lookback+1):
+        dt = datetime.now() - timedelta(days=offset-1)
+        date_str = dt.strftime('%d%m%Y')
+        from_time = f"{date_str}0000"
+        to_time = f"{date_str}1530"
+        url = f"https://data.definedgesecurities.com/sds/history/{segment}/{token}/day/{from_time}/{to_time}"
+        try:
+            response = requests.get(url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                lines = response.text.strip().splitlines()
+                for line in lines:
+                    fields = line.split(',')
+                    if len(fields) >= 5:
+                        closes.append(float(fields[4]))
+                if len(closes) >= 2:
+                    break
+        except Exception:
+            pass
+        if len(closes) >= 2:
+            break
+    closes = list(dict.fromkeys(closes))
+    if len(closes) >= 2:
+        yclose = closes[-2]
+    else:
+        yclose = None
+    return ltp, yclose
+
+def build_master_mapping_from_holdings(holdings_book):
+    mapping = {}
+    raw = holdings_book.get('data', [])
+    if not isinstance(raw, list):
+        return mapping
+    for h in raw:
+        tradingsymbols = h.get("tradingsymbol")
+        if isinstance(tradingsymbols, list):
+            for ts in tradingsymbols:
+                exch = ts.get("exchange", "NSE")
+                tsym = ts.get("tradingsymbol", "")
+                token = ts.get("token", "")
+                if exch and tsym and token:
+                    mapping[(exch, tsym)] = {'segment': exch, 'token': token}
+    return mapping
+
+def holdings_tabular(holdings_book, master_mapping, session_key):
+    raw = holdings_book.get('data', [])
+    table = []
+    total_today_pnl = 0
+    total_overall_pnl = 0
+    total_invested = 0
+    total_current = 0
+    for h in raw:
+        dp_qty = float(h.get("dp_qty", 0) or 0)
+        avg_buy_price = float(h.get("avg_buy_price", 0) or 0)
+        tradingsymbols = h.get("tradingsymbol")
+        if isinstance(tradingsymbols, list):
+            for ts in tradingsymbols:
+                exch = ts.get("exchange", "NSE")
+                if exch != "NSE":
+                    continue
+                tsym = ts.get("tradingsymbol", "N/A")
+                isin = ts.get("isin", "N/A")
+                key = (exch, tsym)
+                segment_token = master_mapping.get(key)
+                if not segment_token:
+                    ltp, yest_close = None, None
+                else:
+                    ltp, yest_close = get_definedge_ltp_and_yclose(segment_token['segment'], segment_token['token'], session_key)
+                holding_qty = dp_qty if dp_qty > 0 else 0
+
+                invested = avg_buy_price * holding_qty
+                current = (ltp or 0) * holding_qty if ltp is not None else 0
+                today_pnl = (ltp - yest_close) * holding_qty if ltp is not None and yest_close is not None else 0
+                overall_pnl = (ltp - avg_buy_price) * holding_qty if ltp is not None else 0
+                pct_change = ((ltp - yest_close) / yest_close * 100) if ltp is not None and yest_close not in (None, 0) else None
+                pct_change_avg = ((ltp - avg_buy_price) / avg_buy_price * 100) if ltp is not None and avg_buy_price not in (None, 0) else None
+
+                total_today_pnl += today_pnl
+                total_overall_pnl += overall_pnl
+                total_invested += invested
+                total_current += current
+
+                table.append({
+                    "Symbol": tsym,
+                    "LTP": ltp,
+                    "Avg Buy": avg_buy_price,
+                    "Qty": holding_qty,
+                    "Prev Close": yest_close,
+                    "% Chg": pct_change,
+                    "Today P&L": today_pnl,
+                    "Overall P&L": overall_pnl,
+                    "% Chg Avg": pct_change_avg,
+                    "Invested": invested,
+                    "Current": current,
+                    "Exchange": exch,
+                    "ISIN": isin
+                })
+    df = pd.DataFrame(table)
+    summary = {
+        "Today P&L": total_today_pnl,
+        "Overall P&L": total_overall_pnl,
+        "Total Invested": total_invested,
+        "Total Current": total_current
+    }
+    return df, summary
+
+def positions_tabular(positions_book):
+    raw = positions_book.get('positions', [])
+    df = pd.DataFrame(raw)
+    if not df.empty:
+        df["% Change"] = df.apply(
+            lambda p: round((float(p.get("lastPrice", 0)) - float(p.get("net_averageprice", 0))) / float(p.get("net_averageprice", 1)) * 100, 2)
+            if float(p.get("net_averageprice", 0)) else None,
+            axis=1
+        )
+    return df
+
+# --- Streamlit App Layout ---
+st.title("Perfect Holdings / Positions (Live LTP & P&L)")
+
+# Read credentials from secrets
 api_token = st.secrets["integrate_api_token"]
 api_secret = st.secrets["integrate_api_secret"]
-uid = st.secrets.get("integrate_uid", "")
-actid = st.secrets.get("integrate_actid", "")
-api_session_key = st.secrets.get("integrate_api_session_key", "")
-ws_session_key = st.secrets.get("integrate_ws_session_key", "")
+api_session_key = st.secrets["integrate_api_session_key"]
 
-# Session management
-@st.cache_resource
-def get_io():
-    conn = ConnectToIntegrate()
-    conn.login(api_token, api_secret)
-    io = IntegrateOrders(conn)
-    return io, conn
+# Session connect
+conn = ConnectToIntegrate()
+conn.login(api_token, api_secret)
+io = IntegrateOrders(conn)
 
-io, conn = get_io()
+# Holdings
+st.header("Holdings")
+try:
+    holdings_book = io.holdings()
+    master_mapping = build_master_mapping_from_holdings(holdings_book)
+    df_hold, summary = holdings_tabular(holdings_book, master_mapping, api_session_key)
+    if not df_hold.empty:
+        st.dataframe(df_hold)
+        st.write("**Summary**")
+        st.write(summary)
+    else:
+        st.info("No NSE holdings found.")
+except Exception as e:
+    st.error(f"Failed to get holdings: {e}")
 
-def ensure_active_session(io, conn):
-    try:
-        resp = io.holdings()
-        if (
-            isinstance(resp, dict)
-            and str(resp.get("status", "")).upper() in ["FAILED", "FAIL", "ERROR"]
-            and "session" in str(resp.get("message", "")).lower()
-        ):
-            st.warning("Session expired. Please regenerate or refresh session keys.")
-            st.stop()
-        return io
-    except Exception as e:
-        st.error(f"Session error: {e}")
-        st.stop()
-
-io = ensure_active_session(io, conn)
-
-sections = [
-    "📊 Holdings (Live LTP & P&L)",
-    "📈 Positions",
-    "🛒 Place Order",
-    "📒 Order Book",
-    "📗 Trade Book",
-    "📘 GTT Orders",
-    "📙 OCO Orders",
-    "🛠️ Modify/Cancel Order",
-    "🔄 Session Status"
-]
-
-st.sidebar.title("Definedge Dashboard")
-section = st.sidebar.radio("Go to", sections)
-
-if section == "📊 Holdings (Live LTP & P&L)":
-    st.header("Holdings (Live LTP & P&L)")
-    try:
-        data = io.holdings()
-        st.write("Holdings API Response:", data)
-        if data.get("data"):
-            df = pd.DataFrame(data["data"])
-            st.dataframe(df)
-        else:
-            st.info(data.get("message", "No holdings found."))
-    except Exception as e:
-        st.error(f"Error: {e}")
-
-elif section == "📈 Positions":
-    st.header("Positions")
-    try:
-        data = io.positions()
-        st.write("Positions API Response:", data)
-        if data.get("positions"):
-            df = pd.DataFrame(data["positions"])
-            st.dataframe(df)
-        else:
-            st.info(data.get("message", "No positions found."))
-    except Exception as e:
-        st.error(f"Error: {e}")
-
-elif section == "🛒 Place Order":
-    st.header("Place Order")
-    with st.form("order_form"):
-        symbol = st.text_input("Symbol (e.g. SBIN-EQ)")
-        qty = st.number_input("Quantity", min_value=1)
-        price = st.number_input("Price (0 = Market)", min_value=0.0, value=0.0)
-        side = st.selectbox("Side", ["BUY", "SELL"])
-        product = st.selectbox("Product", ["CNC", "MIS"])
-        price_type = st.selectbox("Order Type", ["LIMIT", "MARKET"])
-        submit = st.form_submit_button("Place Order")
-        if submit and symbol:
-            try:
-                resp = io.place_order(
-                    tradingsymbol=symbol,
-                    exchange="NSE",
-                    order_type=side,
-                    quantity=int(qty),
-                    product_type=product,
-                    price_type=price_type,
-                    price=str(price)
-                )
-                st.success(f"Order placed! Response: {resp}")
-            except Exception as e:
-                st.error(f"Order failed: {e}")
-
-elif section == "📒 Order Book":
-    st.header("Order Book")
-    try:
-        data = io.orders()
-        st.write("Order Book API Response:", data)
-        if data.get("orders"):
-            df = pd.DataFrame(data["orders"])
-            st.dataframe(df)
-        else:
-            st.info(data.get("message", "No orders found."))
-    except Exception as e:
-        st.error(f"Error: {e}")
-
-elif section == "📗 Trade Book":
-    st.header("Trade Book")
-    try:
-        data = io.tradebook()
-        st.write("Trade Book API Response:", data)
-        if data.get("trades"):
-            df = pd.DataFrame(data["trades"])
-            st.dataframe(df)
-        else:
-            st.info(data.get("message", "No trades found."))
-    except Exception as e:
-        st.error(f"Error: {e}")
-
-elif section == "📘 GTT Orders":
-    st.header("GTT Orders (Place)")
-    symbol = st.text_input("Symbol for GTT", key="gtt_symbol")
-    qty = st.number_input("Quantity", min_value=1, key="gtt_qty")
-    trigger_price = st.number_input("Trigger Price", key="gtt_trigger")
-    price = st.number_input("Order Price", key="gtt_price")
-    side = st.selectbox("Side", ["BUY", "SELL"], key="gtt_side")
-    if st.button("Place GTT Order"):
-        try:
-            resp = io.place_gtt_order(
-                tradingsymbol=symbol,
-                exchange="NSE",
-                order_type=side,
-                quantity=str(qty),
-                alert_price=str(trigger_price),
-                price=str(price),
-                condition="LTP_BELOW" if side=="SELL" else "LTP_ABOVE"
-            )
-            st.success(f"GTT Order Response: {resp}")
-        except Exception as e:
-            st.error(f"GTT order failed: {e}")
-
-elif section == "📙 OCO Orders":
-    st.header("OCO Orders (Place)")
-    symbol = st.text_input("Symbol for OCO", key="oco_symbol")
-    target_qty = st.number_input("Target Quantity", min_value=1, key="oco_tqty")
-    stoploss_qty = st.number_input("Stoploss Quantity", min_value=1, key="oco_sqty")
-    target_price = st.number_input("Target Price", key="oco_tprice")
-    stoploss_price = st.number_input("Stoploss Price", key="oco_sprice")
-    side = st.selectbox("Side", ["BUY", "SELL"], key="oco_side")
-    if st.button("Place OCO Order"):
-        try:
-            resp = io.place_oco_order(
-                tradingsymbol=symbol,
-                exchange="NSE",
-                order_type=side,
-                target_quantity=str(target_qty),
-                stoploss_quantity=str(stoploss_qty),
-                target_price=str(target_price),
-                stoploss_price=str(stoploss_price),
-                remarks="OCO GTT via Streamlit"
-            )
-            st.success(f"OCO Order Response: {resp}")
-        except Exception as e:
-            st.error(f"OCO order failed: {e}")
-
-elif section == "🛠️ Modify/Cancel Order":
-    st.header("Modify/Cancel Pending Orders")
-    try:
-        data = io.orders()
-        st.write("Orders API Response:", data)
-        order_book = data.get("orders", [])
-        pending = [o for o in order_book if o.get("order_status") in ("NEW", "OPEN", "REPLACED") and int(float(o.get("pending_qty", 0))) > 0]
-        if not pending:
-            st.info("No pending orders.")
-        else:
-            df = pd.DataFrame(pending)
-            st.dataframe(df)
-            order_id = st.selectbox("Select order_id to modify/cancel:", df["order_id"])
-            action = st.radio("Action", ["Modify", "Cancel"])
-            if action == "Cancel" and st.button("Cancel Order"):
-                try:
-                    resp = io.cancel_order(order_id)
-                    st.success(f"Cancelled order {order_id}: {resp}")
-                except Exception as e:
-                    st.error(f"Cancel failed: {e}")
-            if action == "Modify":
-                new_price = st.number_input("New Price", min_value=0.0)
-                new_qty = st.number_input("New Quantity", min_value=1)
-                if st.button("Modify Order"):
-                    try:
-                        order = df[df["order_id"] == order_id].iloc[0].to_dict()
-                        resp = io.modify_order(
-                            order_id=order_id,
-                            price=new_price,
-                            quantity=int(new_qty),
-                            price_type=order.get("price_type", "LIMIT"),
-                            exchange=order.get("exchange", "NSE"),
-                            order_type=order.get("order_type", "BUY"),
-                            product_type=order.get("product_type", "CNC"),
-                            tradingsymbol=order.get("tradingsymbol", symbol)
-                        )
-                        st.success(f"Modified order {order_id}: {resp}")
-                    except Exception as e:
-                        st.error(f"Modify failed: {e}")
-    except Exception as e:
-        st.error(f"Order book error: {e}")
-
-elif section == "🔄 Session Status":
-    st.header("Session Status")
-    st.write("API token", api_token)
-    st.write("Session keys", api_session_key)
-    st.write("WS session key", ws_session_key)
-    st.info("If you get a session error, restart the app or refresh session keys in secrets.")
-
-st.sidebar.markdown("---")
-st.sidebar.markdown("**Powered by Definedge API.**")
+# Positions
+st.header("Positions")
+try:
+    positions_book = io.positions()
+    df_pos = positions_tabular(positions_book)
+    if not df_pos.empty:
+        st.dataframe(df_pos)
+    else:
+        st.info("No positions found.")
+except Exception as e:
+    st.error(f"Failed to get positions: {e}")
