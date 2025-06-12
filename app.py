@@ -1,253 +1,369 @@
 import streamlit as st
 import pandas as pd
-from fyers_apiv3 import fyersModel
-import datetime
-import time
+from integrate import ConnectToIntegrate, IntegrateOrders
 
-# ------------- Fyers Login (from Streamlit secrets) -------------
-client_id = st.secrets["client_id"]
-access_token = st.secrets["access_token"]
-fyers = fyersModel.FyersModel(client_id=client_id, token=access_token)
+# --- Definedge Credentials from Streamlit secrets ---
+definedge_api_token = st.secrets["definedge_api_token"]
+definedge_api_secret = st.secrets["definedge_api_secret"]
 
-# ------------- Helper Functions -------------
-def get_full_symbol(symbol):
-    if symbol.startswith("NSE:"):
-        return symbol
-    return f"NSE:{symbol.upper()}-EQ"
+# --- Connect & Session Management ---
+@st.cache_resource
+def get_integrate_orders():
+    conn = ConnectToIntegrate()
+    conn.login(api_token=definedge_api_token, api_secret=definedge_api_secret)
+    io = IntegrateOrders(conn)
+    return io
 
-@st.cache_data(show_spinner="Fetching previous close...")
-def get_prev_trading_close(symbol):
-    today = datetime.datetime.now().date()
-    for i in range(1, 10):
-        dt = today - datetime.timedelta(days=i)
-        dt_str = dt.strftime("%Y-%m-%d")
-        data = {
-            "symbol": symbol,
-            "resolution": "1D",
-            "date_format": "1",
-            "range_from": dt_str,
-            "range_to": dt_str,
-            "cont_flag": "1"
-        }
-        try:
-            candles = fyers.history(data)
-            if candles.get('code') == 200 and candles.get('candles'):
-                prev_close = candles['candles'][0][4]
-                return prev_close
-        except:
-            time.sleep(0.2)
-    return None
+io = get_integrate_orders()
 
-def fetch_ltp(symbol):
+# --- Sidebar Navigation ---
+st.sidebar.title("Definedge Dashboard")
+section = st.sidebar.radio(
+    "Go to", [
+        "📊 Holdings (Live LTP & P&L)",
+        "📈 Exit Holdings/Positions",
+        "🛒 Place Order",
+        "🛠️ Modify/Cancel Order",
+        "📒 Order & Trade Book",
+        "🔔 GTT/OCO Orders (Place)",
+        "🔔 GTT/OCO Modify/Cancel"
+    ]
+)
+
+# --- 1. Holdings ---
+if section == "📊 Holdings (Live LTP & P&L)":
+    st.header("📊 Holdings (Live LTP & P&L)")
     try:
-        quote = fyers.quotes({"symbols": symbol})
-        return float(quote['d'][0]['v']['lp'])
-    except:
-        return 0
+        holdings_raw = io.holdings()
+        data = holdings_raw.get("data", [])
+        rows = []
+        for h in data:
+            ts_list = h.get("tradingsymbol", [])
+            for ts in ts_list:
+                if ts.get("exchange") == "NSE":
+                    symbol = ts.get("tradingsymbol")
+                    isin = ts.get("isin")
+                    token = ts.get("token")
+                    qty = float(h.get("dp_qty", 0) or 0)
+                    avg = float(h.get("avg_buy_price", 0) or 0)
+                    ltp = None
+                    try:
+                        import requests
+                        ltp_url = io.conn.BASE_URL + f"/quotes/NSE/{token}"
+                        resp = requests.get(ltp_url, headers=io.conn.headers)
+                        ltp = float(resp.json().get("ltp", 0))
+                    except Exception:
+                        ltp = 0
+                    invest = avg * qty
+                    pnl = (ltp - avg) * qty if ltp and avg else 0
+                    rows.append({
+                        "Symbol": symbol,
+                        "ISIN": isin,
+                        "Qty": qty,
+                        "Avg Price": avg,
+                        "LTP": ltp,
+                        "Investment": invest,
+                        "P&L": pnl,
+                        "P&L %": round((pnl / invest) * 100, 2) if invest else 0
+                    })
+        st.dataframe(pd.DataFrame(rows))
+    except Exception as e:
+        st.error(f"Failed to fetch holdings: {e}")
 
-def place_order(symbol, side, product, order_type, qty, limit_price, stop_price, order_tag):
-    PRODUCT_MAP = {1: "CNC", 2: "INTRADAY", 3: "CO", 4: "BO"}
-    ORDER_TYPE_MAP = {1: "LIMIT", 2: "MARKET", 3: "SL-M", 4: "SL-L"}
-    order = {
-        "symbol": symbol,
-        "qty": int(qty),
-        "type": 1 if side == 1 else 2,
-        "side": 1 if side == 1 else -1,
-        "productType": PRODUCT_MAP[product],
-        "orderType": ORDER_TYPE_MAP[order_type],
-        "limitPrice": float(limit_price) if order_type in [1,4] else 0,
-        "stopPrice": float(stop_price) if order_type in [3,4] else 0,
-        "disclosedQty": 0,
-        "validity": "DAY",
-        "offlineOrder": False
-    }
-    if order_tag: order["orderTag"] = order_tag
-    return fyers.place_order(order)
-
-def cancel_order(order_id):
-    return fyers.cancel_order({"id": order_id})
-
-def modify_order(order_id, order_type, qty, limit_price, stop_price):
-    disclosed_qty = max(1, int(qty * 0.1))
-    data = {
-        "id": order_id,
-        "type": order_type,
-        "qty": qty,
-        "limitPrice": limit_price,
-        "stopPrice": stop_price,
-        "disclosedQty": disclosed_qty
-    }
-    return fyers.modify_order(data=data)
-
-# ------------- Sidebar Navigation -------------
-st.sidebar.title("Fyers Dashboard")
-menu = st.sidebar.radio("Go to", [
-    "Holiday-Aware Holdings",
-    "Exit Holdings/Positions",
-    "Place Order",
-    "Modify/Cancel Order",
-    "Order & Trade Book"
-])
-
-# ------------- 1. Holiday-Aware Holdings -------------
-if menu == "Holiday-Aware Holdings":
-    st.header("📊 Holdings (Holiday-Aware)")
-    holdings = fyers.holdings()
-    if holdings.get("code", 0) == 200 and holdings.get("holdings"):
-        holdings_data = holdings["holdings"]
-        all_rows = []
-        total_today_pnl = 0
-        for h in holdings_data:
-            symbol = h["symbol"]
-            qty = h["quantity"]
-            avg = h["costPrice"]
-            ltp = h["ltp"]
-            invest = avg * qty
-            pnl = h["pl"]
-            pl_pct = (pnl / invest) * 100 if invest else 0
-            prev_close = get_prev_trading_close(symbol)
-            today_pnl = (ltp - prev_close) * qty if prev_close and qty else 0
-            today_pct = ((ltp - prev_close) / prev_close) * 100 if prev_close else 0
-            total_today_pnl += today_pnl
-            all_rows.append({
-                "Symbol": symbol,
-                "Qty": qty,
-                "Avg Price": avg,
-                "LTP": ltp,
-                "Investment": invest,
-                "Current Value": invest + pnl,
-                "P&L": pnl,
-                "P&L %": round(pl_pct,2),
-                "Prev Close": prev_close if prev_close else "N/A",
-                "Today P&L": round(today_pnl,2),
-                "Today %": round(today_pct,2) if prev_close else "N/A"
-            })
-        st.dataframe(pd.DataFrame(all_rows))
-        st.write("### Overall Summary")
-        st.write(f"**Total Investment:** {holdings['overall']['total_investment']:.2f}")
-        st.write(f"**Total Current Value:** {holdings['overall']['total_current_value']:.2f}")
-        st.write(f"**Overall P&L:** {holdings['overall']['total_pl']:.2f}")
-        st.write(f"**Today's P&L:** {total_today_pnl:.2f}")
-    else:
-        st.info("No holdings found.")
-    funds = fyers.funds()
-    if funds.get("code", 0) == 200 and funds.get("fund_limit"):
-        st.write("### Funds")
-        st.dataframe(pd.DataFrame([funds["fund_limit"][0]]))
-    else:
-        st.info("No funds data.")
-
-# ------------- 2. Exit Holdings/Positions -------------
-elif menu == "Exit Holdings/Positions":
+# --- 2. Exit Holdings/Positions ---
+elif section == "📈 Exit Holdings/Positions":
     st.header("Exit Holdings/Positions")
-    holdings = fyers.holdings().get("holdings", [])
-    positions = fyers.positions().get("netPositions", [])
-    st.subheader("Holdings")
-    if holdings:
-        df = pd.DataFrame(holdings)
-        st.dataframe(df[["symbol", "quantity", "costPrice", "ltp", "pl"]])
-        selected = st.multiselect("Select holdings to exit:", [h["symbol"] for h in holdings])
-        if st.button("Exit Selected Holdings at MARKET"):
-            for h in holdings:
-                if h["symbol"] in selected and h["quantity"] > 0:
-                    resp = place_order(h["symbol"], 2, 1, 2, h["quantity"], 0, 0, "exitorder")
-                    if resp.get("code",0) in [200,1101]:
-                        st.success(f"Exited {h['symbol']}")
-                    else:
-                        st.error(f"{h['symbol']}: {resp.get('message','')}")
-    else:
-        st.info("No holdings found.")
-    st.subheader("Positions")
-    if positions:
-        df = pd.DataFrame(positions)
-        st.dataframe(df[["symbol", "netQty", "buyAvg", "sellAvg", "ltp", "realizedPL", "unrealizedPL", "productType"]])
-        selected = st.multiselect("Select positions to exit:", [p["symbol"] for p in positions])
-        if st.button("Exit Selected Positions at MARKET"):
-            for p in positions:
-                if p["symbol"] in selected and abs(p["netQty"]) > 0:
-                    resp = place_order(p["symbol"], 2, 2, 2, abs(p["netQty"]), 0, 0, "exitorder")
-                    if resp.get("code",0) in [200,1101]:
-                        st.success(f"Exited {p['symbol']}")
-                    else:
-                        st.error(f"{p['symbol']}: {resp.get('message','')}")
-    else:
-        st.info("No positions found.")
+    try:
+        holdings = io.holdings().get("data", [])
+        st.subheader("Holdings")
+        hflat = []
+        for h in holdings:
+            for ts in h.get("tradingsymbol", []):
+                if ts.get("exchange") == "NSE":
+                    hflat.append({
+                        "symbol": ts.get("tradingsymbol"),
+                        "qty": h.get("dp_qty", 0),
+                        "token": ts.get("token")
+                    })
+        if hflat:
+            hdf = pd.DataFrame(hflat)
+            st.dataframe(hdf)
+            selected = st.multiselect("Select symbols to exit:", list(hdf["symbol"]))
+            if st.button("Exit Selected Holdings at MARKET"):
+                for h in hflat:
+                    if h["symbol"] in selected and float(h["qty"]) > 0:
+                        try:
+                            resp = io.place_order(
+                                tradingsymbol=h["symbol"],
+                                exchange="NSE",
+                                order_type="SELL",
+                                quantity=int(float(h["qty"])),
+                                product_type="CNC",
+                                price_type="MARKET",
+                                price="0"
+                            )
+                            if resp.get("status", "").lower() in ("ok", "success") or resp.get("code", 0) == 200:
+                                st.success(f"Exited {h['symbol']}")
+                            else:
+                                st.error(f"{h['symbol']}: {resp.get('message','')}")
+                        except Exception as e:
+                            st.error(f"Order failed: {e}")
+        else:
+            st.info("No holdings found.")
+        st.subheader("Positions")
+        pos = io.positions().get("positions", [])
+        pflat = []
+        for p in pos:
+            pflat.append({
+                "symbol": p.get("tradingsymbol"),
+                "qty": p.get("net_quantity", 0)
+            })
+        if pflat:
+            pdf = pd.DataFrame(pflat)
+            st.dataframe(pdf)
+            selectedp = st.multiselect("Select positions to exit:", list(pdf["symbol"]))
+            if st.button("Exit Selected Positions at MARKET"):
+                for p in pflat:
+                    if p["symbol"] in selectedp and abs(float(p["qty"])) > 0:
+                        try:
+                            resp = io.place_order(
+                                tradingsymbol=p["symbol"],
+                                exchange="NSE",
+                                order_type="SELL",
+                                quantity=int(abs(float(p["qty"]))),
+                                product_type="CNC",
+                                price_type="MARKET",
+                                price="0"
+                            )
+                            if resp.get("status", "").lower() in ("ok", "success") or resp.get("code", 0) == 200:
+                                st.success(f"Exited {p['symbol']}")
+                            else:
+                                st.error(f"{p['symbol']}: {resp.get('message','')}")
+                        except Exception as e:
+                            st.error(f"Order failed: {e}")
+        else:
+            st.info("No positions found.")
+    except Exception as e:
+        st.error(f"Exit failed: {e}")
 
-# ------------- 3. Place Order -------------
-elif menu == "Place Order":
+# --- 3. Place Order ---
+elif section == "🛒 Place Order":
     st.header("Place Buy/Sell Order")
     with st.form("order_form"):
-        symbol = st.text_input("Symbol (e.g. SBIN or NSE:SBIN-EQ)")
-        ltp = fetch_ltp(get_full_symbol(symbol)) if symbol else 0
-        st.write(f"LTP: {ltp if ltp else 'N/A'}")
-        side = st.selectbox("Side", [1,2], format_func=lambda x: "BUY" if x==1 else "SELL")
-        product = st.selectbox("Product", [1,2,3,4], format_func=lambda x: {1:"CNC",2:"INTRADAY",3:"CO",4:"BO"}[x])
-        order_type = st.selectbox("Order Type", [1,2,3,4], format_func=lambda x: {1:"LIMIT",2:"MARKET",3:"SL-M",4:"SL-L"}[x])
-        qty_mode = st.radio("Entry Mode", ["Quantity", "Amount (INR)"])
-        qty = st.number_input("Quantity", min_value=1) if qty_mode=="Quantity" else 0
-        amount = st.number_input("Amount (INR)", min_value=1) if qty_mode=="Amount (INR)" else 0
-        limit_price = st.number_input("Limit Price", value=ltp or 0.0) if order_type in [1,4] else 0
-        stop_price = st.number_input("Trigger Price", value=0.0) if order_type in [3,4] else 0
-        order_tag = st.text_input("Order Tag (optional)", value="")
+        symbol = st.text_input("Symbol (e.g. SBIN-EQ)")
+        qty = st.number_input("Quantity", min_value=1)
+        price = st.number_input("Price (0 = Market)", min_value=0.0, value=0.0)
+        side = st.selectbox("Side", ["BUY", "SELL"])
+        product = st.selectbox("Product", ["CNC", "MIS"])
+        price_type = st.selectbox("Order Type", ["LIMIT", "MARKET"])
         submit = st.form_submit_button("Place Order")
         if submit and symbol:
-            symbol_full = get_full_symbol(symbol)
-            final_qty = qty
-            if qty_mode == "Amount (INR)":
-                price = limit_price if order_type in [1,4] else ltp
-                final_qty = max(1, int(amount // price)) if price else 0
-            resp = place_order(symbol_full, side, product, order_type, final_qty, limit_price, stop_price, order_tag)
-            if resp.get("code",0) in [200,1101]:
-                st.success(f"Order placed! Order ID: {resp.get('id','')}")
-            else:
-                st.error(f"Order failed: {resp.get('message','')}")
-
-# ------------- 4. Modify/Cancel Order -------------
-elif menu == "Modify/Cancel Order":
-    st.header("Modify/Cancel Orders")
-    orders = fyers.orderbook().get("orderBook", [])
-    pending = [o for o in orders if int(o.get("status",0)) in [1,6] and int(o.get("remainingQuantity",0)) > 0]
-    if not pending:
-        st.info("No pending orders.")
-    else:
-        df = pd.DataFrame(pending)
-        st.dataframe(df[["id","symbol","qty","remainingQuantity","filledQty","status","limitPrice","stopPrice","type","productType"]])
-        action = st.selectbox("Action", ["Cancel", "Modify"])
-        selected_ids = st.multiselect("Select Order IDs:", [o["id"] for o in pending])
-        if action == "Cancel" and st.button("Cancel Selected Orders"):
-            for oid in selected_ids:
-                resp = cancel_order(oid)
-                if resp.get("code",0) == 200:
-                    st.success(f"Cancelled {oid}")
+            try:
+                resp = io.place_order(
+                    tradingsymbol=symbol,
+                    exchange="NSE",
+                    order_type=side,
+                    quantity=int(qty),
+                    product_type=product,
+                    price_type=price_type,
+                    price=str(price)
+                )
+                if resp.get("status", "").lower() in ("ok", "success") or resp.get("code", 0) == 200:
+                    st.success(f"Order placed! Order ID: {resp.get('order_id', resp.get('id',''))}")
                 else:
-                    st.error(f"Failed to cancel {oid}: {resp.get('message','')}")
-        if action == "Modify" and st.button("Modify Selected Orders"):
-            for oid in selected_ids:
-                st.write(f"Modify Order {oid}")
-                order_type = st.selectbox(f"Order Type for {oid}", [1,2,3,4], key=f"ot_{oid}")
-                qty = st.number_input(f"New Qty for {oid}", min_value=1, key=f"qty_{oid}")
-                limit_price = st.number_input(f"New Limit Price for {oid}", value=0.0, key=f"lp_{oid}")
-                stop_price = st.number_input(f"New Stop Price for {oid}", value=0.0, key=f"sp_{oid}")
-                if st.button(f"Submit Modification for {oid}"):
-                    resp = modify_order(oid, order_type, qty, limit_price, stop_price)
-                    if resp.get("code",0) == 200:
-                        st.success(f"Modified {oid}")
-                    else:
-                        st.error(f"Failed to modify {oid}: {resp.get('message','')}")
+                    st.error(f"Order failed: {resp.get('message','')}")
+            except Exception as e:
+                st.error(f"Order failed: {e}")
 
-# ------------- 5. Order & Trade Book -------------
-elif menu == "Order & Trade Book":
+# --- 4. Modify/Cancel Order ---
+elif section == "🛠️ Modify/Cancel Order":
+    st.header("Modify/Cancel Pending Orders")
+    try:
+        order_book = io.orders().get("orders", [])
+        pending = [o for o in order_book if o.get("order_status") in ("NEW", "OPEN", "REPLACED") and int(float(o.get("pending_qty", 0))) > 0]
+        if not pending:
+            st.info("No pending orders.")
+        else:
+            df = pd.DataFrame(pending)
+            st.dataframe(df[["order_id", "tradingsymbol", "quantity", "pending_qty", "filled_qty", "price", "order_type", "order_status"]])
+            order_id = st.selectbox("Select order to modify/cancel:", df["order_id"])
+            action = st.radio("Action", ["Modify", "Cancel"])
+            if action == "Cancel" and st.button("Cancel Order"):
+                try:
+                    resp = io.cancel_order(order_id)
+                    st.success(f"Cancelled order {order_id}: {resp}")
+                except Exception as e:
+                    st.error(f"Cancel failed: {e}")
+            if action == "Modify":
+                new_price = st.number_input("New Price", min_value=0.0)
+                new_qty = st.number_input("New Quantity", min_value=1)
+                if st.button("Modify Order"):
+                    try:
+                        order = df[df["order_id"] == order_id].iloc[0].to_dict()
+                        resp = io.modify_order(
+                            order_id=order_id,
+                            price=new_price,
+                            quantity=int(new_qty),
+                            price_type=order.get("price_type", "LIMIT"),
+                            exchange=order.get("exchange", "NSE"),
+                            order_type=order.get("order_type", "BUY"),
+                            product_type=order.get("product_type", "CNC"),
+                            tradingsymbol=order.get("tradingsymbol", symbol)
+                        )
+                        st.success(f"Modified order {order_id}: {resp}")
+                    except Exception as e:
+                        st.error(f"Modify failed: {e}")
+    except Exception as e:
+        st.error(f"Order book error: {e}")
+
+# --- 5. Order & Trade Book ---
+elif section == "📒 Order & Trade Book":
     st.header("Order Book")
-    orders = fyers.orderbook().get("orderBook", [])
-    if not orders:
-        st.info("No order data.")
-    else:
-        df = pd.DataFrame(orders)
-        st.dataframe(df)
+    try:
+        orders = io.orders().get("orders", [])
+        if not orders:
+            st.info("No order data.")
+        else:
+            st.dataframe(pd.DataFrame(orders))
+    except Exception as e:
+        st.error(f"Order book error: {e}")
     st.header("Trade Book")
-    trades = fyers.tradebook().get("tradeBook", [])
-    if not trades:
-        st.info("No trade data.")
-    else:
-        df = pd.DataFrame(trades)
-        st.dataframe(df)
+    try:
+        try:
+            trades = io.tradebook().get("trades", [])
+        except:
+            trades = io.tradebook().get("data", [])
+        if not trades:
+            st.info("No trade data.")
+        else:
+            st.dataframe(pd.DataFrame(trades))
+    except Exception as e:
+        st.error(f"Trade book error: {e}")
+
+# --- 6. Place GTT/OCO Order ---
+elif section == "🔔 GTT/OCO Orders (Place)":
+    st.header("Place GTT/OCO Order")
+    tab = st.tabs(["Single GTT", "OCO GTT"])
+    with tab[0]:
+        st.subheader("Single GTT")
+        symbol = st.text_input("Symbol", key="gttsymbol")
+        qty = st.number_input("Quantity", min_value=1, key="gttqty")
+        trigger_price = st.number_input("Trigger Price")
+        price = st.number_input("Order Price")
+        side = st.selectbox("Side", ["BUY", "SELL"], key="gttside")
+        if st.button("Place Single GTT"):
+            try:
+                resp = io.place_gtt_order(
+                    tradingsymbol=symbol,
+                    exchange="NSE",
+                    order_type=side,
+                    quantity=str(qty),
+                    alert_price=str(trigger_price),
+                    price=str(price),
+                    condition="LTP_BELOW" if side=="SELL" else "LTP_ABOVE"
+                )
+                st.success(f"Placed GTT! {resp}")
+            except Exception as e:
+                st.error(f"GTT place failed: {e}")
+    with tab[1]:
+        st.subheader("OCO GTT")
+        symbol = st.text_input("Symbol", key="ocosymbol")
+        target_qty = st.number_input("Target Quantity", min_value=1)
+        stoploss_qty = st.number_input("Stoploss Quantity", min_value=1)
+        target_price = st.number_input("Target Price")
+        stoploss_price = st.number_input("Stoploss Price")
+        side = st.selectbox("Side", ["BUY", "SELL"], key="ocoside")
+        if st.button("Place OCO GTT"):
+            try:
+                resp = io.place_oco_order(
+                    tradingsymbol=symbol,
+                    exchange="NSE",
+                    order_type=side,
+                    target_quantity=str(target_qty),
+                    stoploss_quantity=str(stoploss_qty),
+                    target_price=str(target_price),
+                    stoploss_price=str(stoploss_price),
+                    remarks="OCO GTT via Streamlit"
+                )
+                st.success(f"Placed OCO GTT! {resp}")
+            except Exception as e:
+                st.error(f"OCO GTT place failed: {e}")
+
+# --- 7. Modify/Cancel GTT/OCO ---
+elif section == "🔔 GTT/OCO Modify/Cancel":
+    st.header("Modify/Cancel GTT/OCO Orders")
+    try:
+        import requests
+        url = io.conn.BASE_URL + "/gttorders"
+        resp = requests.get(url, headers=io.conn.headers)
+        orders = resp.json().get("pendingGTTOrderBook", []) or resp.json().get("gtt_orders", []) or resp.json().get("data", [])
+        if not orders:
+            st.info("No GTT/OCO orders found.")
+        else:
+            df = pd.DataFrame(orders)
+            st.dataframe(df)
+            idx = st.number_input("Select order row number to modify/cancel (1-based)", min_value=1, max_value=len(df))
+            action = st.radio("Action", ["Modify", "Cancel"], key="gttaction")
+            selected = df.iloc[idx-1]
+            alert_id = selected.get("alert_id", selected.get("gtt_id", selected.get("id", "")))
+            if action == "Cancel" and st.button("Cancel GTT/OCO Order"):
+                try:
+                    url = io.conn.BASE_URL + f"/gttcancel/{alert_id}"
+                    resp = requests.get(url, headers=io.conn.headers)
+                    st.success(f"Cancel result: {resp.json()}")
+                except Exception as e:
+                    try:
+                        url2 = io.conn.BASE_URL + f"/ococancel/{alert_id}"
+                        resp2 = requests.get(url2, headers=io.conn.headers)
+                        st.success(f"OCO Cancel result: {resp2.json()}")
+                    except Exception as e2:
+                        st.error(f"Cancel failed: {e}\n{e2}")
+            if action == "Modify":
+                if "stoploss_price" in selected or "target_price" in selected:
+                    # OCO modify
+                    new_target = st.text_input("New Target Price", value=str(selected.get("target_price", "")))
+                    new_stop = st.text_input("New Stoploss Price", value=str(selected.get("stoploss_price", "")))
+                    new_target_qty = st.text_input("New Target Qty", value=str(selected.get("target_quantity", "")))
+                    new_stop_qty = st.text_input("New Stop Qty", value=str(selected.get("stoploss_quantity", "")))
+                    if st.button("Modify OCO GTT"):
+                        try:
+                            url = io.conn.BASE_URL + "/ocomodify"
+                            payload = {
+                                "tradingsymbol": selected.get("tradingsymbol"),
+                                "exchange": selected.get("exchange"),
+                                "order_type": selected.get("order_type"),
+                                "target_quantity": new_target_qty,
+                                "stoploss_quantity": new_stop_qty,
+                                "target_price": new_target,
+                                "stoploss_price": new_stop,
+                                "alert_id": alert_id,
+                                "remarks": "modified by Streamlit"
+                            }
+                            resp = requests.post(url, headers={**io.conn.headers, "Content-Type": "application/json"}, json=payload)
+                            st.success(f"Modify result: {resp.json()}")
+                        except Exception as e:
+                            st.error(f"OCO modify failed: {e}")
+                else:
+                    # Single GTT modify
+                    new_trigger = st.text_input("New Trigger Price", value=str(selected.get("trigger_price", "")))
+                    new_price = st.text_input("New Order Price", value=str(selected.get("price", "")))
+                    new_qty = st.text_input("New Qty", value=str(selected.get("quantity", "")))
+                    if st.button("Modify Single GTT"):
+                        try:
+                            url = io.conn.BASE_URL + "/gttmodify"
+                            payload = {
+                                "exchange": selected.get("exchange"),
+                                "alert_id": alert_id,
+                                "tradingsymbol": selected.get("tradingsymbol"),
+                                "condition": selected.get("condition"),
+                                "order_type": selected.get("order_type"),
+                                "alert_price": new_trigger,
+                                "price": new_price,
+                                "quantity": new_qty
+                            }
+                            resp = requests.post(url, headers={**io.conn.headers, "Content-Type": "application/json"}, json=payload)
+                            st.success(f"Modify result: {resp.json()}")
+                        except Exception as e:
+                            st.error(f"GTT modify failed: {e}")
+    except Exception as e:
+        st.error(f"GTT book error: {e}")
