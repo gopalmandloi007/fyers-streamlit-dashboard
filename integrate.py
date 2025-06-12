@@ -1,44 +1,24 @@
 import requests
-import os
 
 class ConnectToIntegrate:
     BASE_URL = "https://integrate.definedgesecurities.com/dart/v1"
 
     def __init__(self):
-        self.api_session_key = None
-        self.ws_session_key = None
-        self.uid = None
-        self.actid = None
+        self.api_token = None
+        self.api_secret = None
 
     def login(self, api_token, api_secret):
-        # This is a placeholder: Replace with actual Definedge login API if needed
-        url = f"{self.BASE_URL}/login"
-        data = {
-            "api_token": api_token,
-            "api_secret": api_secret
-        }
-        resp = requests.post(url, json=data)
-        resp.raise_for_status()
-        result = resp.json()
-        # Adjust these keys as per actual API response
-        self.api_session_key = result.get("api_session_key")
-        self.ws_session_key = result.get("ws_session_key")
-        self.uid = result.get("uid")
-        self.actid = result.get("actid")
-        return result
-
-    def set_session_keys(self, uid, actid, api_session_key, ws_session_key):
-        self.uid = uid
-        self.actid = actid
-        self.api_session_key = api_session_key
-        self.ws_session_key = ws_session_key
-
-    def get_session_keys(self):
-        return self.uid, self.actid, self.api_session_key, self.ws_session_key
+        # Most APIs just require headers - adjust if your API is different!
+        self.api_token = api_token
+        self.api_secret = api_secret
 
     @property
     def headers(self):
-        return {"Authorization": self.api_session_key}
+        # Adjust header field names if needed as per Definedge docs
+        return {
+            "Authorization": self.api_token,
+            "x-api-secret": self.api_secret
+        }
 
 class IntegrateOrders:
     def __init__(self, conn):
@@ -86,4 +66,14 @@ class IntegrateOrders:
         resp.raise_for_status()
         return resp.json()
 
-    # Add more methods as per your needs (GTT, OCO etc.)
+    def place_gtt_order(self, **kwargs):
+        url = f"{self.conn.BASE_URL}/gtt"
+        resp = requests.post(url, headers={**self.conn.headers, "Content-Type": "application/json"}, json=kwargs)
+        resp.raise_for_status()
+        return resp.json()
+
+    def place_oco_order(self, **kwargs):
+        url = f"{self.conn.BASE_URL}/oco"
+        resp = requests.post(url, headers={**self.conn.headers, "Content-Type": "application/json"}, json=kwargs)
+        resp.raise_for_status()
+        return resp.json()
