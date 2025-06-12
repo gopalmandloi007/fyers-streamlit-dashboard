@@ -8,12 +8,12 @@ class ConnectToIntegrate:
         self.api_secret = None
 
     def login(self, api_token, api_secret):
-        # DO NOT make any HTTP request here!
         self.api_token = api_token
         self.api_secret = api_secret
 
     @property
     def headers(self):
+        # Try "x-api-key" if "Authorization" does not work!
         return {
             "Authorization": self.api_token,
             "x-api-secret": self.api_secret
