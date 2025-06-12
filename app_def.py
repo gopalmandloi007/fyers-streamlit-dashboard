@@ -3,14 +3,41 @@ import pandas as pd
 import requests
 from datetime import datetime, timedelta
 
-from integrate import ConnectToIntegrate, IntegrateOrders
+# ---- Helper API classes ----
+class ConnectToIntegrate:
+    BASE_URL = "https://integrate.definedgesecurities.com/dart/v1"
+    def __init__(self):
+        self.api_token = None
+        self.api_secret = None
+    def login(self, api_token, api_secret):
+        self.api_token = api_token
+        self.api_secret = api_secret
+    @property
+    def headers(self):
+        return {"x-api-key": self.api_token, "x-api-secret": self.api_secret}
 
-st.set_page_config(page_title="Definedge Holdings & Positions", layout="wide")
+class IntegrateOrders:
+    def __init__(self, conn):
+        self.conn = conn
+    def holdings(self):
+        url = f"{self.conn.BASE_URL}/holdings"
+        resp = requests.get(url, headers=self.conn.headers)
+        if resp.status_code != 200:
+            st.error(f"{resp.status_code} - {resp.text}")
+        resp.raise_for_status()
+        return resp.json()
+    def positions(self):
+        url = f"{self.conn.BASE_URL}/positions"
+        resp = requests.get(url, headers=self.conn.headers)
+        if resp.status_code != 200:
+            st.error(f"{resp.status_code} - {resp.text}")
+        resp.raise_for_status()
+        return resp.json()
 
-# --- Helper Functions ---
+# ---- Helper functions ----
 def get_definedge_ltp_and_yclose(segment, token, session_key, max_days_lookback=10):
     headers = {'Authorization': session_key}
-    ltp = None
+    ltp, yclose = None, None
     try:
         url = f"https://integrate.definedgesecurities.com/dart/v1/quotes/{segment}/{token}"
         response = requests.get(url, headers=headers, timeout=10)
@@ -20,7 +47,6 @@ def get_definedge_ltp_and_yclose(segment, token, session_key, max_days_lookback=
     except Exception:
         pass
 
-    yclose = None
     closes = []
     for offset in range(1, max_days_lookback+1):
         dt = datetime.now() - timedelta(days=offset-1)
@@ -45,8 +71,6 @@ def get_definedge_ltp_and_yclose(segment, token, session_key, max_days_lookback=
     closes = list(dict.fromkeys(closes))
     if len(closes) >= 2:
         yclose = closes[-2]
-    else:
-        yclose = None
     return ltp, yclose
 
 def build_master_mapping_from_holdings(holdings_book):
@@ -138,15 +162,16 @@ def positions_tabular(positions_book):
         )
     return df
 
-# --- Streamlit App Layout ---
+# --------- STREAMLIT UI ---------
+st.set_page_config(page_title="Perfect Holdings / Positions (Live LTP & P&L)", layout="wide")
 st.title("Perfect Holdings / Positions (Live LTP & P&L)")
 
-# Read credentials from secrets
+# --- credentials from secrets.toml
 api_token = st.secrets["integrate_api_token"]
 api_secret = st.secrets["integrate_api_secret"]
-api_session_key = st.secrets["integrate_api_session_key"]
+api_session_key = st.secrets.get("integrate_api_session_key", "")
 
-# Session connect
+# connect
 conn = ConnectToIntegrate()
 conn.login(api_token, api_secret)
 io = IntegrateOrders(conn)
@@ -155,14 +180,17 @@ io = IntegrateOrders(conn)
 st.header("Holdings")
 try:
     holdings_book = io.holdings()
-    master_mapping = build_master_mapping_from_holdings(holdings_book)
-    df_hold, summary = holdings_tabular(holdings_book, master_mapping, api_session_key)
-    if not df_hold.empty:
-        st.dataframe(df_hold)
-        st.write("**Summary**")
-        st.write(summary)
+    if not holdings_book.get("data"):
+        st.info("No holdings found or API returned: " + str(holdings_book))
     else:
-        st.info("No NSE holdings found.")
+        master_mapping = build_master_mapping_from_holdings(holdings_book)
+        df_hold, summary = holdings_tabular(holdings_book, master_mapping, api_session_key)
+        if not df_hold.empty:
+            st.dataframe(df_hold)
+            st.write("**Summary**")
+            st.write(summary)
+        else:
+            st.info("No NSE holdings found.")
 except Exception as e:
     st.error(f"Failed to get holdings: {e}")
 
@@ -170,10 +198,13 @@ except Exception as e:
 st.header("Positions")
 try:
     positions_book = io.positions()
-    df_pos = positions_tabular(positions_book)
-    if not df_pos.empty:
-        st.dataframe(df_pos)
+    if not positions_book.get("positions"):
+        st.info("No positions found or API returned: " + str(positions_book))
     else:
-        st.info("No positions found.")
+        df_pos = positions_tabular(positions_book)
+        if not df_pos.empty:
+            st.dataframe(df_pos)
+        else:
+            st.info("No positions data in API result.")
 except Exception as e:
     st.error(f"Failed to get positions: {e}")
