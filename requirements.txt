@@ -1,3 +1,5 @@
 streamlit
-fyers-apiv3
 pandas
+requests
+python-dotenv
+tabulate
