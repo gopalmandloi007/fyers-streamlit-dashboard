@@ -13,9 +13,8 @@ class ConnectToIntegrate:
 
     @property
     def headers(self):
-        # Try "x-api-key" if "Authorization" does not work!
         return {
-            "Authorization": self.api_token,
+            "x-api-key": self.api_token,
             "x-api-secret": self.api_secret
         }
 
